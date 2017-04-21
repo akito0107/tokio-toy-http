@@ -12,10 +12,8 @@ use futures::{future, Future, BoxFuture};
 use tokio_proto::TcpServer;
 use tokio_service::Service;
 
-mod http_parser_cur;
-
 #[macro_use]
-mod http_parser;
+mod http_parser_buf;
 
 pub struct LineCodec;
 
@@ -26,7 +24,7 @@ impl Decoder for LineCodec {
     fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<String>> {
         // let headers = empty_headers!(10);
         // let mut req = http_parser::Request::new(headers);
-        http_parser::parse_request(buf, 100);
+        http_parser_buf::parse_request(buf);
         Ok(None)
         //if let Some(i) = buf.iter().position(|&b| b == b'\n') {
         //    let line = buf.split_to(i);
