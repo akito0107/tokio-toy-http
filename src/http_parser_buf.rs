@@ -2,20 +2,26 @@ use bytes::{Bytes, BytesMut, BufMut, Buf};
 use std::io::{Error, ErrorKind, Cursor, Result};
 use std::io::prelude::*;
 
-macro_rules! advance{
-    ($buf:ident, $size:expr) => {
-        unsafe {
-            $buf.advance($size);
+macro_rules! expect_char{
+    ($expect:expr, $actual:expr) => {
+        if $expect != $actual as char {
+            return Err(Error::new(ErrorKind::Other, "parse error"))
         }
     }
 }
 
-macro_rules! expect_char{
-    ($expect:expr, $actual:expr) => {
-        if $expect != $actual {
-            return Err(Error::new(ErrorKind::Other, "parse error"))
-        }
-    }
+#[derive(Debug)]
+pub struct HttpRequest<'a> {
+    method: HttpMethod,
+    path: &'a Bytes,
+    version: HttpVersion,
+    headers: [HttpHeader<'a>],
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct HttpHeader<'a> {
+    pub name: &'a Bytes,
+    pub value: &'a Bytes,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -59,18 +65,19 @@ impl<'a> BytesWrapper<'a> {
     }
 
     #[inline]
-    pub fn slice(&mut self, head: usize, tail: usize) -> Result<Bytes> {
-        if tail < head || self.len < tail {
-            Error::new(ErrorKind::Other, "invalid range")
-        }
-        Ok(self.bytes.slice(head, tail))
+    pub fn slice(&mut self, head: usize, tail: usize) -> Bytes {
+        self.bytes.slice(head, tail)
     }
 
     #[inline]
     fn next(&mut self) -> Option<u8> {
-        let b = unsafe { *self.bytes.get_unchecked(self.position) };
-        self.position += 1;
-        Some(b)
+        if self.position >= self.len {
+            None
+        } else {
+            let b = unsafe { *self.bytes.get_unchecked(self.position) };
+            self.position += 1;
+            Some(b)
+        }
     }
 
     #[inline]
@@ -88,10 +95,14 @@ pub fn parse_request(bytesMut: &mut BytesMut) -> Result<()> {
     let mut bytes = bytesMut.clone().freeze();
     let mut wrapper = BytesWrapper::new(&bytes);
     let method = try!(parse_method(&mut wrapper));
+    println!("method: {:?}", method);
     wrapper.advance(1);
     let path = try!(parse_token(&mut wrapper));
-    println!("{:?}", method);
-    println!("{:?}", path);
+    println!("path: {:?}", path);
+    let version = try!(parse_minor_version(&mut wrapper));
+    println!("version: {:?}", version);
+    skip_line(&mut wrapper);
+
     Ok(())
 }
 
@@ -100,9 +111,10 @@ fn parse_method(bytes: &mut BytesWrapper) -> Result<HttpMethod> {
     let b = bytes.next().unwrap();
     match b as char {
         'G' => {
-            bytes.advance(2); //ET
+            expect_char!('E', bytes.next().unwrap());
+            expect_char!('T', bytes.next().unwrap());
             Ok(HttpMethod::GET)
-        },
+        }
         //'H' => {
         //    bytes.advance(3);
         //    Ok(HttpMethod::HEAD)
@@ -116,7 +128,7 @@ fn parse_method(bytes: &mut BytesWrapper) -> Result<HttpMethod> {
         //    match bytes.next().unwrap() as char {
         //    }
         //}
-        _ => Ok(HttpMethod::OTHER),
+        _ => Err(Error::new(ErrorKind::Other, "not implemented")),
     }
 }
 
@@ -130,12 +142,83 @@ fn parse_token(bytesWrapper: &mut BytesWrapper) -> Result<Bytes> {
         }
     }
     let current = bytesWrapper.pos();
-    println!("{:?}", pos);
     let u = bytesWrapper.slice(pos, current - 1);
     Ok(u)
 }
 
-fn parse_minor_version(bytesWrapper: &mut BytesWrapper) -> Result<()> {
+fn parse_minor_version(bytesWrapper: &mut BytesWrapper) -> Result<HttpVersion> {
+    expect_char!('H', bytesWrapper.next().unwrap());
+    expect_char!('T', bytesWrapper.next().unwrap());
+    expect_char!('T', bytesWrapper.next().unwrap());
+    expect_char!('P', bytesWrapper.next().unwrap());
+    expect_char!('/', bytesWrapper.next().unwrap());
+    expect_char!('1', bytesWrapper.next().unwrap());
+    expect_char!('.', bytesWrapper.next().unwrap());
 
+    match bytesWrapper.next().unwrap() as char {
+        '0' => Ok(HttpVersion::Version10),
+        '1' => Ok(HttpVersion::Version11),
+        _ => Err(Error::new(ErrorKind::Other, "parse error")),
+    }
+}
+
+fn parse_headers<'a>(bytes: &'a mut BytesWrapper) -> Result<[HttpHeader<'a>]> {
+    let mut headers = Vec::with_capacity(100);
+    loop {
+        let header = match parse_header(bytes) {
+            Ok(res) => res,
+            Err(_) => break
+        };
+        headers.push(header);
+    }
+
+    Ok(headers)
+}
+
+fn parse_header<'a>(bytes: &'a mut BytesWrapper) -> Result<HttpHeader<'a>> {
+    let pos = bytes.pos();
+    loop {
+        let b = bytes.next().unwrap();
+        if b as char == ':' {
+            expect_char!(' ', bytes.next().unwrap());
+            break;
+        }
+    }
+    let current = bytes.pos();
+    let name = bytes.slice(pos, current - 2);
+    let val = try!(read_line(bytes));
+    Ok(HttpHeader { name: name, value: val })
+}
+
+fn read_line(bytes: &mut BytesWrapper) -> Result<Bytes> {
+    let pos = bytes.pos();
+    let end = 0;
+    loop {
+        let b = bytes.next().unwrap();
+        if b as char == '\n' {
+            end = bytes.pos();
+            break;
+        }
+        if b as char == '\r' {
+            end = bytes.pos();
+            expect_char!('\n', bytes.next().unwrap());
+            break;
+        }
+    }
+    let line = bytes.slice(pos, end - 1);
+    Ok(line)
+}
+
+fn skip_line(bytes: &mut BytesWrapper) -> Result<()> {
+    loop {
+        let b = bytes.next().unwrap();
+        if b as char == '\n' {
+            break;
+        }
+        if b as char == '\r' {
+            expect_char!('\n', bytes.next().unwrap());
+            break;
+        }
+    }
     Ok(())
 }
